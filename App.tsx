@@ -45,7 +45,7 @@ const App: React.FC = () => {
   const lastSavedData = useRef<string>("");
   useEffect(() => {
     const currentDataStr = JSON.stringify(data);
-    if (currentDataStr === lastSavedData.current || data.routine.length === 0 && data.students.length === 0 && data.notices.length === 0) return;
+    if (currentDataStr === lastSavedData.current || (data.routine.length === 0 && data.students.length === 0 && data.notices.length === 0)) return;
     
     const timer = setTimeout(async () => {
       setSyncStatus('syncing');
@@ -56,12 +56,12 @@ const App: React.FC = () => {
       } else {
         setSyncStatus('error');
       }
-    }, 1500); // Debounce saves
+    }, 1500);
 
     return () => clearTimeout(timer);
   }, [data]);
 
-  // Voice Assistant State
+  // Voice Assistant Logic
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [textInput, setTextInput] = useState('');
@@ -75,23 +75,6 @@ const App: React.FC = () => {
   const sessionRef = useRef<any>(null);
   const nextStartTimeRef = useRef(0);
 
-  // AI Context Logic
-  const departmentContext = useMemo(() => {
-    return `
-      You are the AI Department Assistant for Uttara University EEE Department (Batch 2026).
-      Your name is EEE-Voice. You help students with their schedule, courses, and department updates.
-      
-      DATA:
-      Routine: ${JSON.stringify(data.routine)}
-      Students: ${data.students.length} total.
-      Faculty: ${data.faculty.map((f: any) => f.name).join(', ')}
-      Active Notices: ${data.notices.map((n: any) => n.title).join(', ')}
-      Courses: ${data.courses.map((c: any) => c.name).join(', ')}
-
-      Rules: Be brief. Use English. Be helpful.
-    `;
-  }, [data]);
-
   const stopAllAudio = useCallback(() => {
     if (audioNodesRef.current) {
       audioNodesRef.current.sources.forEach(s => { try { s.stop(); } catch(e) {} });
@@ -101,10 +84,7 @@ const App: React.FC = () => {
   }, []);
 
   const stopVoiceSession = useCallback(() => {
-    if (sessionRef.current) {
-      sessionRef.current.close();
-      sessionRef.current = null;
-    }
+    if (sessionRef.current) { sessionRef.current.close(); sessionRef.current = null; }
     stopAllAudio();
     setIsConnected(false);
     setIsConnecting(false);
@@ -120,50 +100,28 @@ const App: React.FC = () => {
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       const analyzer = inputCtx.createAnalyser();
       audioContextsRef.current = { input: inputCtx, output: outputCtx };
-      audioNodesRef.current = { 
-        inputNode: inputCtx.createGain(), 
-        outputNode: outputCtx.createGain(), 
-        analyzer, 
-        sources: new Set<AudioBufferSourceNode>() 
-      };
-
+      audioNodesRef.current = { inputNode: inputCtx.createGain(), outputNode: outputCtx.createGain(), analyzer, sources: new Set<AudioBufferSourceNode>() };
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         callbacks: {
           onopen: () => {
-            setIsConnected(true); 
-            setIsConnecting(false); 
-            setStatus('listening');
+            setIsConnected(true); setIsConnecting(false); setStatus('listening');
             const source = inputCtx.createMediaStreamSource(stream);
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
               const pcmBlob = createPCMBlob(e.inputBuffer.getChannelData(0));
               sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob }));
             };
-            source.connect(analyzer); 
-            source.connect(scriptProcessor); 
-            scriptProcessor.connect(inputCtx.destination);
+            source.connect(analyzer); source.connect(scriptProcessor); scriptProcessor.connect(inputCtx.destination);
           },
           onmessage: async (msg: LiveServerMessage) => {
-            if (msg.serverContent?.outputTranscription) {
-              setCurrentOutput(prev => prev + msg.serverContent!.outputTranscription!.text);
-              setStatus('speaking');
-            } else if (msg.serverContent?.inputTranscription) {
-              setCurrentInput(prev => prev + msg.serverContent!.inputTranscription!.text);
-              setStatus('listening');
-            }
-
+            if (msg.serverContent?.outputTranscription) { setCurrentOutput(prev => prev + msg.serverContent!.outputTranscription!.text); setStatus('speaking'); }
+            else if (msg.serverContent?.inputTranscription) { setCurrentInput(prev => prev + msg.serverContent!.inputTranscription!.text); setStatus('listening'); }
             if (msg.serverContent?.turnComplete) {
-              setTranscriptions(prev => [
-                ...prev,
-                { id: Date.now().toString() + '-in', role: 'user', text: currentInput, timestamp: Date.now() },
-                { id: Date.now().toString() + '-out', role: 'model', text: currentOutput, timestamp: Date.now() }
-              ]);
-              setCurrentInput('');
-              setCurrentOutput('');
+              setTranscriptions(prev => [...prev, { id: Date.now().toString() + '-in', role: 'user', text: currentInput, timestamp: Date.now() }, { id: Date.now().toString() + '-out', role: 'model', text: currentOutput, timestamp: Date.now() }]);
+              setCurrentInput(''); setCurrentOutput('');
             }
-
             const base64Audio = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio && audioContextsRef.current && audioNodesRef.current) {
               const { output: outputCtx } = audioContextsRef.current;
@@ -174,62 +132,39 @@ const App: React.FC = () => {
               source.buffer = audioBuffer;
               source.connect(outputNode);
               outputNode.connect(outputCtx.destination);
-              source.addEventListener('ended', () => {
-                sources.delete(source);
-                if (sources.size === 0) setStatus('idle');
-              });
+              source.addEventListener('ended', () => { sources.delete(source); if (sources.size === 0) setStatus('idle'); });
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += audioBuffer.duration;
               sources.add(source);
             }
             if (msg.serverContent?.interrupted) stopAllAudio();
           },
-          onerror: (e) => { console.error(e); stopVoiceSession(); },
+          onerror: () => stopVoiceSession(),
           onclose: () => stopVoiceSession()
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: departmentContext,
+          systemInstruction: `You are EEE-Voice, UU EEE Assistant. Data: ${JSON.stringify(data)}`,
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: VoiceName.ZEPHYR } } },
-          inputAudioTranscription: {},
-          outputAudioTranscription: {}
+          inputAudioTranscription: {}, outputAudioTranscription: {}
         }
       });
       sessionRef.current = await sessionPromise;
-    } catch (err) {
-      console.error(err);
-      setIsConnecting(false);
-    }
+    } catch (err) { setIsConnecting(false); }
   };
 
-  // Admin Handlers
+  // Admin Actions
   const handleAddItem = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const type = showForm;
     const newData = { ...data };
-
-    if (type === 'home' || type === 'routine') {
-      const newItem = { day: formData.get('day'), sub: formData.get('sub'), room: formData.get('room') };
-      newData.routine = [...newData.routine, newItem];
-    } else if (type === 'students') {
-      const newItem = { name: formData.get('name'), id: formData.get('id'), dip: formData.get('dip'), phone: formData.get('phone') };
-      newData.students = [...newData.students, newItem];
-    } else if (type === 'faculty') {
-      const newItem = { name: formData.get('name'), post: formData.get('post'), phone: formData.get('phone') };
-      newData.faculty = [...newData.faculty, newItem];
-    } else if (type === 'notices') {
-      const newItem = { title: formData.get('title'), desc: formData.get('desc'), date: new Date().toLocaleDateString() };
-      newData.notices = [...newData.notices, newItem];
-    } else if (type === 'academic') {
-      const newItem = { name: formData.get('name'), code: formData.get('code'), progress: 0, status: 'Ongoing' };
-      newData.courses = [...newData.courses, newItem];
-    } else if (type === 'polls') {
-      const opts = (formData.get('options') as string).split(',').map(o => ({ text: o.trim(), votes: 0 }));
-      const newItem = { question: formData.get('question'), options: opts };
-      newData.polls = [...newData.polls, newItem];
-    }
-
+    if (type === 'home' || type === 'routine') { newData.routine = [...newData.routine, { day: formData.get('day'), sub: formData.get('sub'), room: formData.get('room') }]; }
+    else if (type === 'students') { newData.students = [...newData.students, { name: formData.get('name'), id: formData.get('id'), dip: formData.get('dip'), phone: formData.get('phone') }]; }
+    else if (type === 'faculty') { newData.faculty = [...newData.faculty, { name: formData.get('name'), post: formData.get('post'), phone: formData.get('phone') }]; }
+    else if (type === 'notices') { newData.notices = [...newData.notices, { title: formData.get('title'), desc: formData.get('desc'), date: new Date().toLocaleDateString() }]; }
+    else if (type === 'academic') { newData.courses = [...newData.courses, { name: formData.get('name'), code: formData.get('code'), progress: 0, status: 'Ongoing' }]; }
+    else if (type === 'polls') { const opts = (formData.get('options') as string).split(',').map(o => ({ text: o.trim(), votes: 0 })); newData.polls = [...newData.polls, { question: formData.get('question'), options: opts }]; }
     setData(newData);
     setShowForm(null);
   };
@@ -250,131 +185,76 @@ const App: React.FC = () => {
     { id: 'polls', icon: 'square-poll-vertical', label: 'Polls' },
   ];
 
-  const AdminFormModal = () => (
-    <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] flex items-center justify-center p-4">
-      <div className="bg-slate-900 border border-white/10 w-full max-w-md rounded-[2.5rem] overflow-hidden shadow-2xl animate-in zoom-in duration-200">
-        <div className="p-6 border-b border-white/5 flex justify-between items-center bg-white/5">
-          <h3 className="text-white font-black uppercase text-xs tracking-widest">Add {showForm}</h3>
-          <button onClick={() => setShowForm(null)} className="text-white/40 hover:text-white"><i className="fas fa-times"></i></button>
-        </div>
-        <form onSubmit={handleAddItem} className="p-8 space-y-4">
-          { (showForm === 'home' || showForm === 'routine') && (
-            <>
-              <input name="day" placeholder="Day & Time (e.g. Sun 10:00)" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <input name="sub" placeholder="Subject Name" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <input name="room" placeholder="Room No." required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-            </>
-          )}
-          { showForm === 'students' && (
-            <>
-              <input name="name" placeholder="Full Name" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <input name="id" placeholder="Student ID" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <input name="dip" placeholder="Diploma Session" className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <input name="phone" placeholder="Phone No." className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-            </>
-          )}
-          { showForm === 'faculty' && (
-            <>
-              <input name="name" placeholder="Teacher Name" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <input name="post" placeholder="Designation" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <input name="phone" placeholder="Phone No." className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-            </>
-          )}
-          { showForm === 'notices' && (
-            <>
-              <input name="title" placeholder="Notice Title" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <textarea name="desc" placeholder="Details..." required rows={4} className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-            </>
-          )}
-          { showForm === 'academic' && (
-            <>
-              <input name="name" placeholder="Course Name" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <input name="code" placeholder="Course Code" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-            </>
-          )}
-          { showForm === 'polls' && (
-            <>
-              <input name="question" placeholder="Poll Question?" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-              <input name="options" placeholder="Option 1, Option 2, ..." required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
-            </>
-          )}
-          <button type="submit" className="w-full py-4 bg-amber-500 text-[#0f2027] font-black rounded-2xl shadow-xl shadow-amber-500/20 active:scale-95 transition-transform">SAVE RECORD</button>
-        </form>
-      </div>
-    </div>
-  );
-
   return (
     <div className="min-h-screen bg-[#0f2027] text-slate-200 font-sans flex overflow-hidden">
-      {showForm && <AdminFormModal />}
-      
-      {/* Mobile Sidebar Overlay */}
-      {isSidebarOpen && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] md:hidden" onClick={() => setIsSidebarOpen(false)} />
+      {showForm && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-white/10 w-full max-w-md rounded-[2.5rem] overflow-hidden shadow-2xl animate-in zoom-in duration-200">
+            <div className="p-6 border-b border-white/5 flex justify-between items-center bg-white/5">
+              <h3 className="text-white font-black uppercase text-xs tracking-widest">Add {showForm}</h3>
+              <button onClick={() => setShowForm(null)} className="text-white/40 hover:text-white"><i className="fas fa-times"></i></button>
+            </div>
+            <form onSubmit={handleAddItem} className="p-8 space-y-4">
+              {(showForm === 'home' || showForm === 'routine') && (
+                <><input name="day" placeholder="Day & Time" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
+                <input name="sub" placeholder="Subject Name" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
+                <input name="room" placeholder="Room No." required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" /></>
+              )}
+              {showForm === 'students' && (
+                <><input name="name" placeholder="Full Name" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
+                <input name="id" placeholder="Student ID" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
+                <input name="dip" placeholder="Diploma Session" className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" /></>
+              )}
+              {showForm === 'faculty' && (
+                <><input name="name" placeholder="Teacher Name" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
+                <input name="post" placeholder="Designation" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" /></>
+              )}
+              {showForm === 'notices' && (
+                <><input name="title" placeholder="Notice Title" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
+                <textarea name="desc" placeholder="Details..." required rows={4} className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" /></>
+              )}
+              {showForm === 'academic' && (
+                <><input name="name" placeholder="Course Name" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
+                <input name="code" placeholder="Course Code" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" /></>
+              )}
+              {showForm === 'polls' && (
+                <><input name="question" placeholder="Poll Question?" required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" />
+                <input name="options" placeholder="Option 1, Option 2, ..." required className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm outline-none focus:border-amber-500" /></>
+              )}
+              <button type="submit" className="w-full py-4 bg-amber-500 text-[#0f2027] font-black rounded-2xl shadow-xl shadow-amber-500/20">SAVE RECORD</button>
+            </form>
+          </div>
+        </div>
       )}
 
-      {/* Responsive Sidebar */}
-      <div className={`
-        fixed inset-y-0 left-0 w-64 bg-slate-900/95 border-r border-white/5 flex flex-col p-4 z-[70] 
-        transform transition-transform duration-300 ease-in-out
-        ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-        md:static md:translate-x-0 md:bg-slate-900/50
-      `}>
+      {isSidebarOpen && <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] md:hidden" onClick={() => setIsSidebarOpen(false)} />}
+
+      {/* Sidebar */}
+      <div className={`fixed inset-y-0 left-0 w-64 bg-slate-900/95 border-r border-white/5 flex flex-col p-4 z-[70] transform transition-transform duration-300 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:static md:translate-x-0 md:bg-slate-900/50`}>
         <div className="mb-8 flex items-center justify-between px-2">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-amber-500 flex items-center justify-center shadow-lg shadow-amber-500/20">
-              <i className="fas fa-bolt text-[#0f2027]"></i>
-            </div>
+            <div className="w-8 h-8 rounded-lg bg-amber-500 flex items-center justify-center shadow-lg shadow-amber-500/20"><i className="fas fa-bolt text-[#0f2027]"></i></div>
             <span className="font-black tracking-tighter text-xl text-white">UU <span className="text-amber-500">EEE</span></span>
           </div>
-          <button onClick={() => setIsSidebarOpen(false)} className="md:hidden text-white/40 hover:text-white">
-            <i className="fas fa-times"></i>
-          </button>
+          <button onClick={() => setIsSidebarOpen(false)} className="md:hidden text-white/40"><i className="fas fa-times"></i></button>
         </div>
-
         <nav className="flex-1 space-y-1">
           {menuItems.map(item => (
-            <button
-              key={item.id}
-              onClick={() => { setActiveTab(item.id as any); setIsSidebarOpen(false); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 text-sm font-bold ${
-                activeTab === item.id 
-                  ? 'bg-amber-500 text-[#0f2027] shadow-lg shadow-amber-500/10' 
-                  : 'text-slate-400 hover:bg-white/5 hover:text-white'
-              }`}
-            >
-              <i className={`fas fa-${item.icon} w-5`}></i>
-              {item.label}
+            <button key={item.id} onClick={() => { setActiveTab(item.id as any); setIsSidebarOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all text-sm font-bold ${activeTab === item.id ? 'bg-amber-500 text-[#0f2027]' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}>
+              <i className={`fas fa-${item.icon} w-5`}></i>{item.label}
             </button>
           ))}
         </nav>
-
         <div className="mt-auto pt-4 border-t border-white/5 space-y-2">
-          <button 
-            onClick={() => setIsAdmin(!isAdmin)}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors ${isAdmin ? 'bg-amber-500/10 text-amber-400' : 'text-white/20 hover:text-white'}`}
-          >
-            <i className={`fas fa-${isAdmin ? 'lock-open' : 'lock'}`}></i>
-            {isAdmin ? 'Admin Mode Active' : 'Admin Login'}
-          </button>
-          
-          {/* Sync Status Badge */}
+          <button onClick={() => setIsAdmin(!isAdmin)} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest ${isAdmin ? 'bg-amber-500/10 text-amber-400' : 'text-white/20 hover:text-white'}`}><i className={`fas fa-${isAdmin ? 'lock-open' : 'lock'}`}></i>{isAdmin ? 'Admin Mode Active' : 'Admin Login'}</button>
           <div className="flex items-center gap-2 px-4 py-2 opacity-40">
-            <div className={`w-2 h-2 rounded-full ${
-              syncStatus === 'synced' ? 'bg-green-500' : 
-              syncStatus === 'syncing' ? 'bg-amber-500 animate-pulse' : 
-              syncStatus === 'error' ? 'bg-red-500' : 'bg-slate-500'
-            }`}></div>
-            <span className="text-[8px] font-black uppercase tracking-[0.2em]">
-              {syncStatus === 'synced' ? 'Cloud Synced' : 
-               syncStatus === 'syncing' ? 'Syncing...' : 
-               syncStatus === 'error' ? 'Sync Failed' : 'Ready'}
-            </span>
+            <div className={`w-2 h-2 rounded-full ${syncStatus === 'synced' ? 'bg-green-500' : syncStatus === 'syncing' ? 'bg-amber-500 animate-pulse' : 'bg-red-500'}`}></div>
+            <span className="text-[8px] font-black uppercase tracking-widest">{syncStatus}</span>
           </div>
         </div>
       </div>
 
-      {/* Main Content Area */}
+      {/* Main Container */}
       <main className="flex-1 flex flex-col relative overflow-hidden">
         {/* Header */}
         <header className="h-20 border-b border-white/5 flex items-center justify-between px-4 md:px-8 bg-[#0f2027]/80 backdrop-blur-xl z-10 shrink-0">
@@ -387,51 +267,40 @@ const App: React.FC = () => {
           </div>
           <div className="flex items-center gap-4">
              {isAdmin && activeTab !== 'attendance' && (
-               <button onClick={() => setShowForm(activeTab)} className="px-4 py-2 bg-amber-500 text-[#0f2027] rounded-lg text-[10px] font-black uppercase tracking-widest transition-all hover:scale-105 active:scale-95 shadow-lg shadow-amber-500/20">
-                 <i className="fas fa-plus md:mr-2"></i> <span className="hidden md:inline">Add Record</span>
+               <button onClick={() => setShowForm(activeTab)} className="px-4 py-2 bg-amber-500 text-[#0f2027] rounded-lg text-[10px] font-black uppercase tracking-widest shadow-lg shadow-amber-500/20 active:scale-95 transition-transform">
+                 <i className="fas fa-plus md:mr-2"></i><span className="hidden md:inline">Add Record</span>
                </button>
              )}
           </div>
         </header>
 
-        {/* Dynamic Content Scroll Area */}
+        {/* Dynamic Content */}
         <div className="flex-1 p-4 md:p-8 overflow-y-auto custom-scrollbar pb-32">
           {activeTab === 'home' && (
-            <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500 max-w-5xl">
+            <div className="space-y-8 max-w-5xl animate-in slide-in-from-bottom-4 duration-500">
               <section className="space-y-4">
-                <h2 className="font-black text-white text-sm uppercase tracking-tighter flex items-center gap-2 px-1">
-                  <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span> LATEST BULLETIN
-                </h2>
+                <h2 className="font-black text-white text-sm uppercase flex items-center gap-2 px-1"><span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span> LATEST BULLETIN</h2>
                 <div className="flex gap-4 overflow-x-auto no-scrollbar pb-4 snap-x">
                   {data.notices.length > 0 ? data.notices.slice().reverse().map((n: any, i: number) => (
                     <div key={i} className="min-w-[280px] md:min-w-[320px] snap-center bg-slate-900 border border-white/5 rounded-[2.5rem] p-8 shadow-xl relative overflow-hidden group">
                       <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-amber-500/10 to-transparent rounded-bl-[5rem] -mr-8 -mt-8"></div>
                       <div className="flex items-center gap-2 mb-4">
                         <span className="bg-amber-500 text-[#0f2027] text-[9px] font-black px-3 py-1 rounded-full uppercase">{n.date}</span>
-                        {isAdmin && (
-                          <button onClick={() => handleRemoveItem('notices', data.notices.length - 1 - i)} className="ml-auto text-white/20 hover:text-rose-500 transition-colors"><i className="fas fa-trash-alt text-xs"></i></button>
-                        )}
+                        {isAdmin && <button onClick={() => handleRemoveItem('notices', data.notices.length - 1 - i)} className="ml-auto text-white/10 hover:text-rose-500 transition-colors"><i className="fas fa-trash-alt text-xs"></i></button>}
                       </div>
                       <h3 className="text-xl font-black text-white leading-tight mb-3 group-hover:text-amber-500 transition-colors">{n.title}</h3>
                       <p className="text-slate-400 text-xs line-clamp-3 font-medium leading-relaxed">{n.desc}</p>
                     </div>
-                  )) : (
-                    <div className="w-full bg-slate-900/50 rounded-[2.5rem] p-12 text-center text-slate-500 italic text-xs border border-white/5">No notices to display.</div>
-                  )}
+                  )) : <div className="w-full bg-slate-900/50 rounded-[2.5rem] p-12 text-center text-slate-500 italic text-xs border border-white/5">No notices to display.</div>}
                 </div>
               </section>
 
               <section className="space-y-4">
-                <h2 className="font-black text-white text-sm uppercase tracking-tighter px-1">📅 CLASS SCHEDULE</h2>
+                <h2 className="font-black text-white text-sm uppercase px-1">📅 CLASS SCHEDULE</h2>
                 <div className="bg-slate-900/50 rounded-[2.5rem] border border-white/5 overflow-hidden shadow-2xl">
                   <table className="w-full text-sm">
                     <thead className="bg-white/5 text-amber-500">
-                      <tr>
-                        <th className="p-5 text-left font-black uppercase text-[10px] tracking-widest">Time</th>
-                        <th className="p-5 text-left font-black uppercase text-[10px] tracking-widest">Subject</th>
-                        <th className="p-5 text-left font-black uppercase text-[10px] tracking-widest">Room</th>
-                        {isAdmin && <th className="p-5 w-10"></th>}
-                      </tr>
+                      <tr><th className="p-5 text-left font-black uppercase text-[10px] tracking-widest">Time</th><th className="p-5 text-left font-black uppercase text-[10px] tracking-widest">Subject</th><th className="p-5 text-left font-black uppercase text-[10px] tracking-widest">Room</th>{isAdmin && <th className="p-5 w-10"></th>}</tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
                       {data.routine.map((item: any, idx: number) => (
@@ -439,9 +308,7 @@ const App: React.FC = () => {
                           <td className="p-5 font-black text-white">{item.day}</td>
                           <td className="p-5 font-bold text-slate-400">{item.sub}</td>
                           <td className="p-5"><span className="bg-amber-500/10 text-amber-500 px-4 py-1.5 rounded-xl text-[10px] font-black border border-amber-500/20">{item.room}</span></td>
-                          {isAdmin && (
-                            <td className="p-5 text-right"><button onClick={() => handleRemoveItem('routine', idx)} className="text-white/20 hover:text-rose-500"><i className="fas fa-trash-alt"></i></button></td>
-                          )}
+                          {isAdmin && <td className="p-5 text-right"><button onClick={() => handleRemoveItem('routine', idx)} className="text-white/10 hover:text-rose-500"><i className="fas fa-trash-alt"></i></button></td>}
                         </tr>
                       ))}
                     </tbody>
@@ -456,11 +323,8 @@ const App: React.FC = () => {
                {data.courses.map((c: any, i: number) => (
                  <div key={i} className="bg-slate-900 p-8 rounded-[2.5rem] border border-white/5 shadow-xl space-y-4">
                     <div className="flex justify-between items-start">
-                       <div>
-                         <h3 className="font-black text-white text-xl">{c.name}</h3>
-                         <p className="text-[10px] text-amber-500 font-black uppercase tracking-widest">{c.code}</p>
-                       </div>
-                       {isAdmin && <button onClick={() => handleRemoveItem('courses', i)} className="text-white/20 hover:text-rose-500"><i className="fas fa-trash-alt"></i></button>}
+                       <div><h3 className="font-black text-white text-xl">{c.name}</h3><p className="text-[10px] text-amber-500 font-black uppercase tracking-widest">{c.code}</p></div>
+                       {isAdmin && <button onClick={() => handleRemoveItem('courses', i)} className="text-white/10 hover:text-rose-500"><i className="fas fa-trash-alt"></i></button>}
                     </div>
                     <div className="space-y-2">
                        <div className="flex justify-between text-[10px] font-black text-white/40 uppercase"><span>Progress</span><span>{c.progress}%</span></div>
@@ -472,17 +336,14 @@ const App: React.FC = () => {
           )}
 
           {activeTab === 'students' && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-5xl">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-w-6xl">
                {data.students.map((s: any, i: number) => (
                  <div key={i} className="bg-slate-900 p-6 rounded-[2rem] border border-white/5 flex items-center justify-between group">
                     <div className="flex items-center gap-4">
                        <div className="w-12 h-12 rounded-2xl bg-white/5 flex items-center justify-center text-amber-500 font-black">{s.name.charAt(0)}</div>
-                       <div>
-                         <h4 className="font-black text-white">{s.name}</h4>
-                         <p className="text-[10px] text-white/30 uppercase font-bold">ID: {s.id} • Session: {s.dip}</p>
-                       </div>
+                       <div><h4 className="font-black text-white">{s.name}</h4><p className="text-[10px] text-white/30 uppercase font-bold">ID: {s.id} • {s.dip}</p></div>
                     </div>
-                    {isAdmin && <button onClick={() => handleRemoveItem('students', i)} className="text-white/10 hover:text-rose-500 group-hover:opacity-100 opacity-0 transition-opacity"><i className="fas fa-user-minus"></i></button>}
+                    {isAdmin && <button onClick={() => handleRemoveItem('students', i)} className="text-white/10 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity"><i className="fas fa-user-minus"></i></button>}
                  </div>
                ))}
             </div>
@@ -494,11 +355,7 @@ const App: React.FC = () => {
                  <div key={i} className="bg-slate-900 p-8 rounded-[2.5rem] border border-white/5 flex justify-between items-center">
                     <div className="flex items-center gap-6">
                        <div className="w-16 h-16 rounded-[1.5rem] bg-amber-500 text-[#0f2027] flex items-center justify-center text-2xl shadow-xl shadow-amber-500/10"><i className="fas fa-user-tie"></i></div>
-                       <div>
-                         <h3 className="text-2xl font-black text-white">{f.name}</h3>
-                         <p className="text-amber-500 text-[10px] font-black uppercase tracking-[0.3em]">{f.post}</p>
-                         <p className="text-white/40 text-xs mt-2 font-bold"><i className="fas fa-phone mr-2"></i>{f.phone}</p>
-                       </div>
+                       <div><h3 className="text-2xl font-black text-white">{f.name}</h3><p className="text-amber-500 text-[10px] font-black uppercase tracking-[0.3em]">{f.post}</p><p className="text-white/40 text-xs mt-2 font-bold"><i className="fas fa-phone mr-2"></i>{f.phone}</p></div>
                     </div>
                     {isAdmin && <button onClick={() => handleRemoveItem('faculty', i)} className="text-white/10 hover:text-rose-500"><i className="fas fa-trash-alt"></i></button>}
                  </div>
@@ -509,13 +366,11 @@ const App: React.FC = () => {
           {activeTab === 'notices' && (
             <div className="space-y-6 max-w-4xl">
                {data.notices.slice().reverse().map((n: any, i: number) => (
-                 <div key={i} className="bg-slate-900 p-10 rounded-[3rem] border border-white/5 relative">
+                 <div key={i} className="bg-slate-900 p-10 rounded-[3rem] border border-white/5 relative group">
                     <span className="absolute top-8 right-10 text-[10px] font-black text-white/20 uppercase tracking-widest">{n.date}</span>
                     <h2 className="text-3xl font-black text-white mb-6 pr-20">{n.title}</h2>
                     <div className="bg-white/5 p-8 rounded-[2rem] text-slate-400 text-sm leading-relaxed border border-white/5">{n.desc}</div>
-                    {isAdmin && (
-                      <button onClick={() => handleRemoveItem('notices', data.notices.length - 1 - i)} className="mt-6 text-rose-500/50 hover:text-rose-500 text-xs font-black uppercase tracking-widest flex items-center gap-2"><i className="fas fa-trash-alt"></i> Remove Post</button>
-                    )}
+                    {isAdmin && <button onClick={() => handleRemoveItem('notices', data.notices.length - 1 - i)} className="mt-6 text-rose-500/50 hover:text-rose-500 text-xs font-black uppercase tracking-widest flex items-center gap-2"><i className="fas fa-trash-alt"></i> Remove Post</button>}
                  </div>
                ))}
             </div>
@@ -531,7 +386,7 @@ const App: React.FC = () => {
                     </div>
                     <div className="space-y-3">
                        {p.options.map((opt: any, oi: number) => (
-                         <div key={oi} className="bg-white/5 p-4 rounded-2xl border border-white/5 flex justify-between items-center hover:bg-white/10 transition-colors cursor-pointer">
+                         <div key={oi} className="bg-white/5 p-4 rounded-2xl border border-white/5 flex justify-between items-center hover:bg-white/10 transition-colors cursor-pointer group/opt">
                             <span className="font-bold text-slate-300">{opt.text}</span>
                             <span className="text-xs font-black text-amber-500">{opt.votes} votes</span>
                          </div>
@@ -549,13 +404,8 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* AI Assistant UI (Same as before but integrated) */}
-        <div className={`
-          absolute right-4 md:right-8 top-24 bottom-6 w-[calc(100%-2rem)] md:w-80 
-          bg-slate-900/95 border border-white/10 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl 
-          flex flex-col overflow-hidden transition-all duration-500 z-50
-          ${isConnected ? 'translate-y-0 opacity-100' : 'translate-y-8 opacity-0 pointer-events-none'}
-        `}>
+        {/* Voice Assistant Panel */}
+        <div className={`absolute right-4 md:right-8 top-24 bottom-6 w-[calc(100%-2rem)] md:w-80 bg-slate-900/95 border border-white/10 rounded-[2.5rem] backdrop-blur-2xl shadow-2xl flex flex-col overflow-hidden transition-all duration-500 z-50 ${isConnected ? 'translate-y-0 opacity-100' : 'translate-y-8 opacity-0 pointer-events-none'}`}>
           <div className="p-5 border-b border-white/5 flex items-center justify-between">
             <div className="flex items-center gap-3"><div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div><span className="text-[10px] font-black uppercase tracking-widest text-white">EEE-Voice</span></div>
             <button onClick={stopVoiceSession} className="text-white/20 hover:text-white"><i className="fas fa-times"></i></button>
